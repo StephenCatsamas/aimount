@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage: sudo ai-unmount NAME
+name=${1:?Usage: sudo ai-unmount NAME}
+[[ -n "$name" && "$name" != . && "$name" != .. && "$name" != */* ]] || { echo "Invalid workspace name: $name" >&2; exit 1; }
+view="/srv/ai-workspaces/$name"
+
+if mountpoint -q "$view/.git"; then
+    umount "$view/.git"
+fi
+umount "$view"
+rmdir "$view"
+echo "Unmounted: $view"
