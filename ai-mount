@@ -97,7 +97,9 @@ mount --make-private "$stage/tree"
 
 find "$stage/tree" -name .git -prune -print0 > "$stage/git-paths"
 
-while IFS= read -r -d '' gitpath; do
+# Close the list before processing, so it cannot keep staging busy during cleanup.
+mapfile -d '' -t gitpaths < "$stage/git-paths"
+for gitpath in "${gitpaths[@]}"; do
     [[ ! -L "$gitpath" ]] || die "Symlinked Git directory: $gitpath"
 
     if [[ -d "$gitpath" ]]; then
@@ -137,7 +139,7 @@ while IFS= read -r -d '' gitpath; do
     fi
 
     mount --bind -o ro,nosuid,nodev "$gitpath" "$gitpath"
-done < "$stage/git-paths"
+done
 
 # Nothing is accessible to ai before all Git entries have been protected.
 mount --move "$stage/tree" "$view"
