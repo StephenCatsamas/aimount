@@ -1,0 +1,2 @@
+#!/bin/bash -p
+exec /usr/bin/sudo /usr/bin/setpriv --no-new-privs -- /usr/sbin/runuser --pty --login ai
