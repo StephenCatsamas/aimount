@@ -1,0 +1,146 @@
+#!/bin/bash -p
+
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+
+die() {
+    echo "ai-mount: $*" >&2
+    exit 1
+}
+
+(( EUID == 0 )) || die 'Run with sudo from your own account'
+(( $# == 1 || $# == 2 )) || die 'Usage: sudo ai-mount DIRECTORY [NAME]'
+
+owner=${SUDO_USER:?Run with sudo from your own account}
+owner_uid=$(id -u "$owner")
+ai_uid=$(id -u ai)
+ai_gid=$(id -g ai)
+
+(( owner_uid != ai_uid )) || die "The 'ai' user cannot run this"
+(( owner_uid != 0 )) || die 'Run sudo from your own account, not root'
+
+owner_home=$(getent passwd "$owner" | cut -d: -f6)
+owner_home=$(realpath -e -- "$owner_home")
+src=$(realpath -e -- "$1")
+
+[[ -d "$src" && "$src" == "$owner_home/"* ]] ||
+    die 'Share a directory strictly below your home'
+[[ $(stat -c %u -- "$src") == "$owner_uid" ]] || die 'Source must belong to you'
+
+case "$src/" in
+    */.git/*)
+        die 'Share a working tree, not Git metadata'
+        ;;
+esac
+
+[[ ! -f "$src/HEAD" || ! -d "$src/objects" ]] || die 'Bare Git repositories are unsupported'
+
+name=${2:-$(basename -- "$src")}
+[[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || die 'Invalid workspace name'
+
+base=/srv/ai-workspaces
+[[ ! -L "$base" && $(stat -c '%u:%a' "$base") == 0:750 ]] ||
+    die "$base must be root-owned, mode 750"
+
+view="$base/$name"
+
+exec 9> /run/ai-mount.lock
+flock -x 9
+
+[[ ! -e "$view" && ! -L "$view" ]] || die "Destination already exists: $view"
+
+stage=$(mktemp -d /run/ai-mount.XXXXXX)
+published=0
+
+cleanup() {
+    local status=$?
+    trap - EXIT
+
+    if (( ! published )) && mountpoint -q "$view"; then
+        mount -o remount,bind,ro,nosuid,nodev "$view"
+        umount --recursive "$view"
+    fi
+
+    if mountpoint -q "$stage"; then
+        umount --recursive "$stage"
+    fi
+
+    rm -f "$stage/git-paths"
+    if [[ -d "$stage/tree" ]]; then
+        rmdir "$stage/tree"
+    fi
+    rmdir "$stage"
+
+    if (( ! published )) && [[ -d "$view" ]]; then
+        rmdir "$view"
+    fi
+
+    exit "$status"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+mkdir "$stage/tree" "$view"
+
+# A private staging parent permits moving the completed tree into place.
+mount --bind "$stage" "$stage"
+mount --make-private "$stage"
+
+source_gid=$(stat -c %g -- "$src")
+mapping="u:$ai_uid:$owner_uid:1 g:$ai_gid:$source_gid:1"
+
+mount --bind -o "nosuid,nodev,X-mount.idmap=$mapping" "$src" "$stage/tree"
+mount --make-private "$stage/tree"
+
+find "$stage/tree" -name .git -prune -print0 > "$stage/git-paths"
+
+while IFS= read -r -d '' gitpath; do
+    [[ ! -L "$gitpath" ]] || die "Symlinked Git directory: $gitpath"
+
+    if [[ -d "$gitpath" ]]; then
+        unusual=$(find "$gitpath" \( -type l -o -type f -links +1 \) -print -quit)
+        [[ -z "$unusual" ]] || die "Linked Git metadata: $unusual"
+        [[ ! -e "$gitpath/objects/info/alternates" && ! -e "$gitpath/commondir" ]] ||
+            die 'Separate Git storage is unsupported'
+
+    elif [[ -f "$gitpath" ]]; then
+        [[ $(stat -c %h -- "$gitpath") == 1 ]] || die 'Hard-linked Git pointer'
+
+        IFS= read -r pointer < "$gitpath"
+        [[ "$pointer" == 'gitdir: '* ]] || die "Invalid Git pointer: $gitpath"
+
+        gitdir=${pointer#gitdir: }
+        original="$src/${gitpath#"$stage/tree/"}"
+        [[ "$gitdir" == /* ]] || gitdir="$(dirname -- "$original")/$gitdir"
+        gitdir=$(realpath -e -- "$gitdir")
+
+        [[ -d "$gitdir" && "$gitdir" == "$owner_home/"* ]] ||
+            die 'Git metadata must be beneath your home'
+
+        case "$gitdir" in
+            */.git/worktrees/*)
+                [[ $(< "$gitdir/commondir") == ../.. ]] || die 'Custom Git common directory'
+                ;;
+            */.git/modules/*)
+                [[ ! -e "$gitdir/commondir" ]] || die 'Custom Git common directory'
+                ;;
+            *)
+                die 'Only conventional worktree/submodule pointers are supported'
+                ;;
+        esac
+
+    else
+        die "Unsupported Git entry: $gitpath"
+    fi
+
+    mount --bind -o ro,nosuid,nodev "$gitpath" "$gitpath"
+done < "$stage/git-paths"
+
+# Nothing is accessible to ai before all Git entries have been protected.
+mount --move "$stage/tree" "$view"
+published=1
+
+echo "Mounted: $view"
