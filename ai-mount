@@ -90,7 +90,7 @@ mount --bind "$stage" "$stage"
 mount --make-private "$stage"
 
 source_gid=$(stat -c %g -- "$src")
-mapping="u:$ai_uid:$owner_uid:1 g:$ai_gid:$source_gid:1"
+mapping="u:$owner_uid:$ai_uid:1 g:$source_gid:$ai_gid:1"
 
 mount --bind -o "nosuid,nodev,X-mount.idmap=$mapping" "$src" "$stage/tree"
 mount --make-private "$stage/tree"
