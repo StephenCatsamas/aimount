@@ -1,14 +1,31 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
+
 set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
-# Usage: sudo ai-unmount NAME
-name=${1:?Usage: sudo ai-unmount NAME}
-[[ -n "$name" && "$name" != . && "$name" != .. && "$name" != */* ]] || { echo "Invalid workspace name: $name" >&2; exit 1; }
-view="/srv/ai-workspaces/$name"
+die() {
+    echo "ai-unmount: $*" >&2
+    exit 1
+}
 
-if mountpoint -q "$view/.git"; then
-    umount "$view/.git"
-fi
-umount "$view"
+(( EUID == 0 )) || die 'Run with sudo'
+(( $# == 1 )) || die 'Usage: sudo ai-unmount NAME'
+[[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || die 'Invalid workspace name'
+
+base=/srv/ai-workspaces
+[[ ! -L "$base" && $(stat -c '%u:%a' "$base") == 0:750 ]] ||
+    die "$base must be root-owned, mode 750"
+
+view="$base/$1"
+
+exec 9> /run/ai-mount.lock
+flock -x 9
+
+mountpoint -q "$view" || die "Not mounted: $view"
+
+# If a child cannot be unmounted, the remaining tree stays read-only.
+mount -o remount,bind,ro,nosuid,nodev "$view"
+umount --recursive "$view"
 rmdir "$view"
+
 echo "Unmounted: $view"
