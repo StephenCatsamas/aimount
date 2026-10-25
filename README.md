@@ -19,6 +19,8 @@ sudo ai-mount "$HOME/code/project" project
 sudo ai-unmount project
 ```
 
+For sibling worktrees, unmount affected shares, run `git worktree repair --relative-paths ../worktree` in the original main checkout, then mount both checkouts using their original directory names.
+
 Open an AI login shell with `no_new_privs` enabled, then launch your agent from the shared workspace:
 
 ```bash
